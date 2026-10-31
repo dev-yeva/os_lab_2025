@@ -40,24 +40,30 @@ int main(int argc, char **argv) {
         switch (option_index) {
           case 0:
             seed = atoi(optarg);
-            // your code here
-            // error handling
+            if (seed <= 0) {
+              printf("seed must be positive\n");
+              return 1;
+            }
             break;
           case 1:
             array_size = atoi(optarg);
-            // your code here
-            // error handling
+            if (array_size <= 0) {
+              printf("array_size must be positive\n");
+              return 1;
+            }
             break;
           case 2:
             pnum = atoi(optarg);
-            // your code here
-            // error handling
+            if (pnum <= 0) {
+              printf("pnum must be positive\n");
+              return 1;
+            }
             break;
           case 3:
             with_files = true;
             break;
 
-          defalut:
+          default:
             printf("Index %d is out of options\n", option_index);
         }
         break;
@@ -88,6 +94,18 @@ int main(int argc, char **argv) {
   GenerateArray(array, array_size, seed);
   int active_child_processes = 0;
 
+  // One pipe per child: pipes[2*i] = read end, pipes[2*i+1] = write end
+  int pipes[2 * pnum];
+
+  if (!with_files) {
+    for (int i = 0; i < pnum; i++) {
+      if (pipe(&pipes[2 * i]) < 0) {
+        printf("Pipe creation failed!\n");
+        return 1;
+      }
+    }
+  }
+
   struct timeval start_time;
   gettimeofday(&start_time, NULL);
 
@@ -98,13 +116,31 @@ int main(int argc, char **argv) {
       active_child_processes += 1;
       if (child_pid == 0) {
         // child process
+        unsigned int begin = (array_size * i) / pnum;
+        unsigned int end   = (array_size * (i + 1)) / pnum;
 
-        // parallel somehow
+        struct MinMax min_max = GetMinMax(array, begin, end);
 
         if (with_files) {
-          // use files here
+          char filename[64];
+          snprintf(filename, sizeof(filename), "min_max_%d.txt", i);
+          FILE *f = fopen(filename, "w");
+          if (!f) {
+            printf("Failed to open file for writing\n");
+            exit(1);
+          }
+          fprintf(f, "%d %d\n", min_max.min, min_max.max);
+          fclose(f);
         } else {
-          // use pipe here
+          for (int j = 0; j < pnum; j++) {
+            if (j != i) {
+              close(pipes[2 * j]);
+              close(pipes[2 * j + 1]);
+            }
+          }
+          close(pipes[2 * i]); // close read end in child
+          write(pipes[2 * i + 1], &min_max, sizeof(min_max));
+          close(pipes[2 * i + 1]);
         }
         return 0;
       }
@@ -115,9 +151,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  while (active_child_processes > 0) {
-    // your code here
+  // Parent: close write ends of all pipes so read() sees EOF when children finish
+  if (!with_files) {
+    for (int i = 0; i < pnum; i++) {
+      close(pipes[2 * i + 1]);
+    }
+  }
 
+  while (active_child_processes > 0) {
+    wait(NULL);
     active_child_processes -= 1;
   }
 
@@ -130,9 +172,30 @@ int main(int argc, char **argv) {
     int max = INT_MIN;
 
     if (with_files) {
-      // read from files
+      char filename[64];
+      snprintf(filename, sizeof(filename), "min_max_%d.txt", i);
+      FILE *f = fopen(filename, "r");
+      if (!f) {
+        printf("Failed to open file for reading: %s\n", filename);
+        return 1;
+      }
+      if (fscanf(f, "%d %d", &min, &max) != 2) {
+        printf("Failed to read from file: %s\n", filename);
+        fclose(f);
+        return 1;
+      }
+      fclose(f);
+      remove(filename); // cleanup
     } else {
-      // read from pipes
+      struct MinMax child_mm;
+      ssize_t r = read(pipes[2 * i], &child_mm, sizeof(child_mm));
+      close(pipes[2 * i]);
+      if (r != sizeof(child_mm)) {
+        printf("Failed to read from pipe\n");
+        return 1;
+      }
+      min = child_mm.min;
+      max = child_mm.max;
     }
 
     if (min < min_max.min) min_max.min = min;
